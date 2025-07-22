@@ -3,6 +3,7 @@
 
 #include <filesystem>
 #include <memory>
+#include <optional>
 #include <sys/types.h>
 #include <libsdb/registers.hpp>
 
@@ -28,7 +29,10 @@ namespace sdb
     {
     public:
         ~process();
-        static std::unique_ptr<process> launch(std::filesystem::path path, bool debug = true);
+        static std::unique_ptr<process> launch(
+            std::filesystem::path path,
+            bool debug = true,
+            std::optional<int> stdout_replacement = std::nullopt);
         static std::unique_ptr<process> attach(pid_t pid);
 
         void resume();
@@ -49,6 +53,14 @@ namespace sdb
         void write_fprs(const user_fpregs_struct& fprs);
         void write_grps(const user_regs_struct& gprs);
 
+        virt_addr get_pc() const
+        {
+            return virt_addr
+            {
+                get_registers().read_by_id_as<std::uint64_t>(register_id::rip)
+            };
+        }
+
     private:
         process(pid_t pid, bool terminate_on_end, bool is_attached)
             : pid_(pid),
@@ -57,7 +69,7 @@ namespace sdb
               registers_(new registers(*this)) {}
 
         void read_all_registers();
-        
+
 
         pid_t pid_ = 0;
         bool terminate_on_end_ = true;

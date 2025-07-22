@@ -2,9 +2,7 @@
 #include <sys/ptrace.h>
 #include <sys/types.h>
 #include <sys/wait.h>
-
 #include <libsdb/error.hpp>
-
 #include <libsdb/pipe.hpp>
 
 namespace
@@ -17,7 +15,10 @@ namespace
     }
 }
 
-std::unique_ptr<sdb::process> sdb::process::launch(std::filesystem::path path, bool debug)
+std::unique_ptr<sdb::process> sdb::process::launch(
+    std::filesystem::path path,
+    bool debug,
+    std::optional<int> stdout_replacement)
 {
     bool close_on_exec = true;
     pipe channel(close_on_exec);
@@ -31,6 +32,14 @@ std::unique_ptr<sdb::process> sdb::process::launch(std::filesystem::path path, b
     if (pid == 0)
     {
         channel.close_read();
+        if (stdout_replacement)
+        {
+            close(STDOUT_FILENO);
+            if (dup2(*stdout_replacement, STDOUT_FILENO) < 0)
+            {
+                exit_with_perror(channel, "stdout replacement failed");
+            }
+        }
         if (debug && ptrace(PTRACE_TRACEME, 0, nullptr, nullptr) < 0)
         {
             exit_with_perror(channel, "Tracing failed");

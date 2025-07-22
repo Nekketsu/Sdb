@@ -1,9 +1,10 @@
 cmake_minimum_required(VERSION 3.19)
 
-project("sdb" LANGUAGES CXX)
+project("sdb" LANGUAGES CXX ASM)
 
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(libedit REQUIRED IMPORTED_TARGET libedit)
+find_package(fmt CONFIG REQUIRED)
 
 include(CTest)
 
