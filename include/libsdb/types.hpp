@@ -43,32 +43,32 @@ namespace sdb
             return *this;
         }
 
-        bool operator==(virt_addr& other)
+        bool operator==(const virt_addr& other) const
         {
             return addr_ == other.addr_;
         }
 
-        bool operator!=(virt_addr& other)
+        bool operator!=(const virt_addr& other) const
         {
             return addr_ != other.addr_;
         }
 
-        bool operator<(virt_addr& other)
+        bool operator<(const virt_addr& other) const
         {
             return addr_ < other.addr_;
         }
 
-        bool operator<=(virt_addr& other)
+        bool operator<=(const virt_addr& other) const
         {
             return addr_ <= other.addr_;
         }
 
-        bool operator>(virt_addr& other)
+        bool operator>(const virt_addr& other) const
         {
             return addr_ > other.addr_;
         }
 
-        bool operator>=(virt_addr& other)
+        bool operator>=(const virt_addr& other) const
         {
             return addr_ >= other.addr_;
         }
