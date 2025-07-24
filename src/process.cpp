@@ -1,10 +1,12 @@
 #include <libsdb/process.hpp>
+#include <libsdb/bit.hpp>
 #include <sys/ptrace.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <sys/personality.h>
 #include <libsdb/error.hpp>
 #include <libsdb/pipe.hpp>
-#include <sys/personality.h>
+#include <sys/uio.h>
 
 namespace
 {
@@ -268,4 +270,69 @@ sdb::stop_reason sdb::process::step_instruction()
         to_reenable.value()->enable();
     }
     return reason;
+}
+
+std::vector<std::byte> sdb::process::read_memory(virt_addr address, std::size_t amount) const
+{
+    std::vector<std::byte> ret(amount);
+
+    iovec local_desc{ ret.data(), ret.size() };
+    std::vector<iovec> remote_descs;
+    while (amount > 0)
+    {
+        auto up_to_next_page = 0x1000 - (address.addr() & 0xfff);
+        auto chunk_size = std::min(amount, up_to_next_page);
+        remote_descs.push_back({ reinterpret_cast<void*>(address.addr()), chunk_size });
+        amount -= chunk_size;
+        address += chunk_size;
+    }
+
+    if (process_vm_readv(pid_, &local_desc, /*liovcnt=*/1,
+        remote_descs.data(), /*riovcnt=*/remote_descs.size(), /*flags=*/0) < 0)
+    {
+        error::send_errno("Cound not read process memory");
+    }
+    return ret;
+}
+
+std::vector<std::byte> sdb::process::read_memory_without_traps(virt_addr address, size_t amount) const
+{
+    auto memory = read_memory(address, amount);
+    auto sites = breakpoint_sites_.get_in_region(address, address + amount);
+    for (auto site : sites)
+    {
+        if (!site->is_enabled())
+        {
+            continue;
+        }
+        auto offset = site->address() - address.addr();
+        memory[offset.addr()] = site->saved_data_;
+    }
+    return memory;
+}
+
+void sdb::process::write_memory(virt_addr address, span<const std::byte> data)
+{
+    std::size_t written = 0;
+    while (written < data.size())
+    {
+        auto remaining = data.size() - written;
+        std::uint64_t word;
+        if (remaining >= 8)
+        {
+            word = from_bytes<std::uint64_t>(data.begin() + written);
+        }
+        else
+        {
+            auto read = read_memory(address + written, 8);
+            auto word_data = reinterpret_cast<char*>(&word);
+            std::memcpy(word_data, data.begin() + written, remaining);
+            std::memcpy(word_data + remaining, read.data() + remaining, 8 - remaining);
+        }
+        if (ptrace(PTRACE_POKEDATA, pid_, address + written, word) < 0)
+        {
+            error::send_errno("Failed to write memory");
+        }
+        written += 8;
+    }
 }
