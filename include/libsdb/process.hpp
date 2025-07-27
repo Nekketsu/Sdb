@@ -10,6 +10,7 @@
 #include <libsdb/breakpoint_site.hpp>
 #include <libsdb/stoppoint_collection.hpp>
 #include <libsdb/bit.hpp>
+#include <libsdb/watchpoint.hpp>
 
 namespace sdb
 {
@@ -67,7 +68,7 @@ namespace sdb
 
         sdb::stop_reason step_instruction();
 
-        breakpoint_site& create_breakpoint_site(virt_addr address);
+        breakpoint_site& create_breakpoint_site(virt_addr address, bool hardware = false, bool internal = false);
         
         stoppoint_collection<breakpoint_site>& breakpoint_sites() { return breakpoint_sites_; }
         
@@ -89,6 +90,21 @@ namespace sdb
             return from_bytes<T>(data.data());
         }
 
+        int set_hardware_breakpoint(breakpoint_site::id_type, virt_addr address);
+        void clear_hardware_stoppoint(int index);
+
+        int set_watchpoint(watchpoint::id_type id, virt_addr address, stoppoint_mode mode, std::size_t size);
+
+        watchpoint& create_watchpoint(virt_addr address, stoppoint_mode mode, std::size_t size);
+        stoppoint_collection<watchpoint>& watchpoints()
+        {
+            return watchpoints_;
+        }
+        const stoppoint_collection<watchpoint>& watchpoints() const
+        {
+            return watchpoints_;
+        }
+
     private:
         process(pid_t pid, bool terminate_on_end, bool is_attached)
             : pid_(pid),
@@ -97,6 +113,8 @@ namespace sdb
               registers_(new registers(*this)) {}
 
         void read_all_registers();
+        
+        int set_hardware_stoppoint(virt_addr address, stoppoint_mode mode, std::size_t size);
 
 
         pid_t pid_ = 0;
@@ -105,6 +123,7 @@ namespace sdb
         bool is_attached_ = true;
         std::unique_ptr<registers> registers_;
         stoppoint_collection<breakpoint_site> breakpoint_sites_;
+        stoppoint_collection<watchpoint> watchpoints_;
     };
 }
 

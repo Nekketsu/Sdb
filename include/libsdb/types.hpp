@@ -98,6 +98,11 @@ namespace sdb
         T* data_ = nullptr;
         std::size_t size_ = 0;
     };
+
+    enum class stoppoint_mode
+    {
+        write, read_write, execute
+    };
 }
 
 #endif
