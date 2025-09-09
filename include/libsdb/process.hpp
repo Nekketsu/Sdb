@@ -11,6 +11,7 @@
 #include <libsdb/stoppoint_collection.hpp>
 #include <libsdb/bit.hpp>
 #include <libsdb/watchpoint.hpp>
+#include <unordered_map>
 
 namespace sdb
 {
@@ -163,6 +164,8 @@ namespace sdb
         {
             syscall_catch_policy_ = std::move(info);
         }
+
+        std::unordered_map<int, std::uint64_t> get_auxv() const;
 
     private:
         process(pid_t pid, bool terminate_on_end, bool is_attached)
