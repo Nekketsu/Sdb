@@ -1,6 +1,7 @@
 #ifndef SDB_BIT_HPP
 #define SDB_BIT_HPP
 
+#include <cstring>
 #include <libsdb/types.hpp>
 #include <vector>
 #include <string_view>

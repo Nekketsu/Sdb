@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <elf.h>
 #include <vector>
+#include <string_view>
 #include <unordered_map>
 #include <optional>
 #include <libsdb/types.hpp>
@@ -11,6 +12,7 @@
 
 namespace sdb
 {
+    class dwarf;
     class elf
     {
     public:
@@ -51,6 +53,9 @@ namespace sdb
         std::optional<const Elf64_Sym*> get_symbol_containing_address(file_addr addr) const;
         std::optional<const Elf64_Sym*> get_symbol_containing_address(virt_addr addr) const;
 
+        dwarf& get_dwarf() { return *dwarf_; }
+        const dwarf& get_dwarf() const { return *dwarf_; }
+
     private:
         void parse_section_headers();
         void build_section_map();
@@ -78,6 +83,7 @@ namespace sdb
             }
         };
         std::map<std::pair<file_addr, file_addr>, Elf64_Sym*, range_comparator> symbol_addr_map_;
+        std::unique_ptr<dwarf> dwarf_;
     };
 }
 

@@ -6,8 +6,9 @@
 #include <libsdb/elf.hpp>
 #include <libsdb/error.hpp>
 #include <libsdb/bit.hpp>
-#include <cxxabi.h>
 #include <algorithm>
+#include <cxxabi.h>
+#include <libsdb/dwarf.hpp>
 
 sdb::elf::elf(const std::filesystem::path& path)
 {
@@ -39,6 +40,7 @@ sdb::elf::elf(const std::filesystem::path& path)
     build_section_map();
     parse_symbol_table();
     build_symbol_maps();
+    dwarf_ = std::make_unique<dwarf>(*this);
 }
 
 sdb::elf::~elf()
