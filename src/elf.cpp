@@ -252,7 +252,7 @@ std::optional<const Elf64_Sym*> sdb::elf::get_symbol_containing_address(file_add
     }
 
     --it;
-    if (auto [key, value] = *it; key.first <= address and key.second > address)
+    if (auto [key, value] = *it; key.first < address and key.second > address)
     {
         return value;
     }

@@ -36,13 +36,13 @@ namespace sdb
             return virt_addr(addr_ - offset);
         }
 
-        virt_addr operator+=(std::int64_t offset)
+        virt_addr &operator+=(std::int64_t offset)
         {
             addr_ += offset;
             return *this;
         }
 
-        virt_addr operator-=(std::int64_t offset)
+        virt_addr &operator-=(std::int64_t offset)
         {
             addr_ -= offset;
             return *this;

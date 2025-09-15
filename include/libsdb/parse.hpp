@@ -2,11 +2,11 @@
 #define SDB_PARSE_HPP
 
 #include <charconv>
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <string_view>
 #include <array>
-#include <cstddef>
 
 namespace sdb
 {

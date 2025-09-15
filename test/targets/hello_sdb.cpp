@@ -1,6 +1,4 @@
 #include <cstdio>
-
-int main()
-{
+int main() {
     std::puts("Hello, sdb!");
 }

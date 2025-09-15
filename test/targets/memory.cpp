@@ -2,8 +2,7 @@
 #include <sys/signal.h>
 #include <unistd.h>
 
-int main()
-{
+int main() {
     unsigned long long a = 0xcafecafe;
     auto a_address = &a;
 

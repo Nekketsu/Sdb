@@ -1,6 +1,5 @@
 void do_something();
 
-int main()
-{
+int main() {
     do_something();
 }
