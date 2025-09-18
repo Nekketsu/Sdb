@@ -10,7 +10,7 @@ sdb::virt_addr sdb::file_addr::to_virt_addr() const
     {
         return virt_addr{};
     }
-    return virt_addr {addr_ + elf_->load_bias().addr() };
+    return virt_addr{ addr_ + elf_->load_bias().addr() };
 }
 
 sdb::file_addr sdb::virt_addr::to_file_addr(const elf& obj) const
@@ -20,5 +20,5 @@ sdb::file_addr sdb::virt_addr::to_file_addr(const elf& obj) const
     {
         return file_addr{};
     }
-    return file_addr { obj, addr_ - obj.load_bias().addr() };
+    return file_addr{ obj, addr_ - obj.load_bias().addr() };
 }

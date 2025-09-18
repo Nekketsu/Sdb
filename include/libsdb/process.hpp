@@ -12,6 +12,7 @@
 #include <libsdb/bit.hpp>
 #include <libsdb/watchpoint.hpp>
 #include <unordered_map>
+#include <csignal>
 
 namespace sdb
 {
@@ -45,7 +46,7 @@ namespace sdb
         syscall_catch_policy(mode mode, std::vector<int> to_catch) :
             mode_(mode), to_catch_(std::move(to_catch)) {}
 
-        mode mode_;
+        mode mode_ = mode::none;
         std::vector<int> to_catch_;
     };
 
@@ -77,12 +78,38 @@ namespace sdb
     {
         stop_reason(int wait_status);
 
+        stop_reason() = default;
+        stop_reason(process_state reason, std::uint8_t info,
+            std::optional<trap_type> trap_reason = std::nullopt,
+            std::optional<syscall_information> syscall_info = std::nullopt)
+            : reason(reason)
+            , info(info)
+            , trap_reason(trap_reason)
+            , syscall_info(syscall_info)
+            {}
+
+        bool is_step() const
+        {
+            return reason == process_state::stopped
+                and info == SIGTRAP
+                and trap_reason == trap_type::single_step;
+        }
+
+        bool is_breakpoint() const
+        {
+            return reason == process_state::stopped
+                and info == SIGTRAP
+                and (trap_reason == trap_type::software_break
+                    or trap_reason == trap_type::hardware_break);
+        }
+
         process_state reason;
         std::uint8_t info;
         std::optional<trap_type> trap_reason;
         std::optional<syscall_information> syscall_info;
     };
 
+    class target;
     class process
     {
     public:
@@ -101,7 +128,7 @@ namespace sdb
         process& operator=(const process&) = delete;
 
         process_state state() const { return state_; }
-        pid_t pid() const { return pid_; };
+        pid_t pid() const { return pid_; }
 
         registers& get_registers() { return *registers_; }
         const registers& get_registers() const { return *registers_; }
@@ -109,7 +136,7 @@ namespace sdb
         void write_user_area(std::size_t offset, std::uint64_t data);
         
         void write_fprs(const user_fpregs_struct& fprs);
-        void write_grps(const user_regs_struct& gprs);
+        void write_gprs(const user_regs_struct& gprs);
 
         virt_addr get_pc() const
         {
@@ -143,7 +170,7 @@ namespace sdb
             return from_bytes<T>(data.data());
         }
 
-        int set_hardware_breakpoint(breakpoint_site::id_type, virt_addr address);
+        int set_hardware_breakpoint(breakpoint_site::id_type id, virt_addr address);
         void clear_hardware_stoppoint(int index);
 
         int set_watchpoint(watchpoint::id_type id, virt_addr address, stoppoint_mode mode, std::size_t size);
@@ -166,6 +193,10 @@ namespace sdb
         }
 
         std::unordered_map<int, std::uint64_t> get_auxv() const;
+
+        void set_target(target* tgt) { target_ = tgt; }
+
+        breakpoint_site& create_breakpoint_site(breakpoint* parent, breakpoint_site::id_type id, virt_addr address, bool hardware = false, bool internal = false);
 
     private:
         process(pid_t pid, bool terminate_on_end, bool is_attached)
@@ -191,6 +222,7 @@ namespace sdb
         stoppoint_collection<watchpoint> watchpoints_;
         syscall_catch_policy syscall_catch_policy_ = syscall_catch_policy::catch_none();
         bool expecting_syscall_exit_ = false;
+        target* target_ = nullptr;
     };
 }
 

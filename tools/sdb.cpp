@@ -13,12 +13,14 @@
 #include <libsdb/error.hpp>
 #include <fmt/format.h>
 #include <fmt/ranges.h>
-#include <libsdb/parse.hpp>
 #include <libsdb/disassembler.hpp>
 #include <libsdb/syscalls.hpp>
 #include <libsdb/target.hpp>
 #include <csignal>
 #include <libsdb/parse.hpp>
+#include <fstream>
+#include <filesystem>
+#include <cmath>
 
 namespace
 {
@@ -42,9 +44,46 @@ namespace
         {
             auto program_path = argv[1];
             auto target = sdb::target::launch(program_path);
-            fmt::print("Launched procesws with PID {}\n", target->get_process().pid());
+            fmt::print("Launched process with PID {}\n", target->get_process().pid());
             return target;
         }
+    }
+
+    void print_source(const std::filesystem::path& path, std::uint64_t line, std::uint64_t n_lines_context)
+    {
+        std::ifstream file{ path.string() };
+        auto start_line = line <= n_lines_context ? 1 : line - n_lines_context;
+        auto end_line = line + n_lines_context + 1;
+
+        char c{};
+        auto current_line = 1u;
+        while (current_line != start_line && file.get(c))
+        {
+            if (c == '\n')
+            {
+                ++current_line;
+            }
+        }
+
+        auto print_line_start = [&](auto current_line)
+        {
+            auto fill_width = static_cast<int>(std::floor(std::log10(end_line))) + 1;
+            auto arrow = current_line == line ? ">" : " ";
+            fmt::print("{} {:>{}} ", arrow, current_line, fill_width);
+        };
+
+        print_line_start(current_line);
+        while (current_line <= end_line && file.get(c))
+        {
+            std::cout << c;
+            if (c == '\n')
+            {
+                ++current_line;
+                print_line_start(current_line);
+            }
+        }
+
+        std::cout << std::endl;
     }
 
     void print_disassembly(sdb::process& process, sdb::virt_addr address, std::size_t n_instructions)
@@ -116,10 +155,10 @@ namespace
         {
             return " (single step)";
         }
-        else if (reason.trap_reason == sdb::trap_type::syscall)
+        if (reason.trap_reason == sdb::trap_type::syscall)
         {
             const auto& info = *reason.syscall_info;
-            std::string message = " ";
+            std::string message;
             if (info.entry)
             {
                 message += "(syscall entry)\n";
@@ -141,14 +180,21 @@ namespace
     std::string get_signal_stop_reason(const sdb::target& target, sdb::stop_reason reason)
     {
         auto& process = target.get_process();
+        auto pc = process.get_pc();
         std::string message = fmt::format("stopped with signal {} at {:#x}",
-            sigabbrev_np(reason.info), process.get_pc().addr());
+            sigabbrev_np(reason.info), pc.addr());
 
-        auto func = target.get_elf().get_symbol_containing_address(process.get_pc());
-        if (func and ELF64_ST_TYPE(func.value()->st_info) == STT_FUNC)
+        auto line = target.line_entry_at_pc();
+        if (line != sdb::line_table::iterator())
         {
-            message += fmt::format(" ({})",
-                target.get_elf().get_string(func.value()->st_name));
+            auto file = line->file_entry->path.filename().string();
+            message += fmt::format(", {}:{}", file, line->line);
+        }
+
+        auto func_name = target.function_name_at_address(pc);
+        if (func_name != "")
+        {
+            message += fmt::format(" ({})", func_name);
         }
 
         if (reason.info == SIGTRAP)
@@ -185,7 +231,20 @@ namespace
         print_stop_reason(target, reason);
         if (reason.reason == sdb::process_state::stopped)
         {
-            print_disassembly(target.get_process(), target.get_process().get_pc(), 5);
+            if (target.get_stack().inline_height() > 0)
+            {
+                auto stack = target.get_stack().inline_stack_at_pc();
+                auto frame = stack[stack.size() - target.get_stack().inline_height()];
+                print_source(frame.file().path, frame.line(), 3);
+            }
+            else if (auto entry = target.line_entry_at_pc(); entry != sdb::line_table::iterator())
+            {
+                print_source(entry->file_entry-> path, entry->line, 3);
+            }
+            else
+            {
+                print_disassembly(target.get_process(), target.get_process().get_pc(), 5);
+            }
         }
     }
 
@@ -198,9 +257,12 @@ namespace
     catchpoint  - Commands for operating on catchpoints
     continue    - Resume the process
     disassemble - Disassemble machine code to assembly
+    finish      - Step-out
     memory      - Commands for operating on memory
+    next        - Step-over
     register    - Commands for operating on registers
-    step        - Step over a single instruction
+    step        - Step-in
+    stepi       - Single instruction step
     watchpoint  - Commands for operating on watchpoints
 )";
         }
@@ -234,7 +296,7 @@ namespace
         {
             std::cerr << R"(Available commands:
     read <address>
-    read <address> <number_of_bytes>
+    read <address> <number of bytes>
     write <address> <bytes>
 )";
         }
@@ -244,7 +306,7 @@ namespace
     read
     read <register>
     read all
-    write <register> value
+    write <register> <value>
 )";
         }
         else if (is_prefix(args[1], "watchpoint"))
@@ -351,8 +413,8 @@ namespace
         }
         catch(...)
         {
-            sdb::error::send("Invalid format");
         }
+        sdb::error::send("Invalid format");
     }
 
     void handle_register_write(sdb::process& process, const std::vector<std::string>& args)
@@ -397,7 +459,141 @@ namespace
         }
     }
 
-    void handle_breakpoint_command(sdb::process& process, const std::vector<std::string>& args)
+    void handle_breakpoint_list_command(sdb::target& target)
+    {
+        if (target.breakpoints().empty())
+        {
+            fmt::print("No breakpoints set\n");
+        }
+        else
+        {
+            fmt::print("Current breakpoints:\n");
+            target.breakpoints().for_each([](auto& bp)
+            {
+                if (bp.is_internal())
+                {
+                    return;
+                }
+                fmt::print("{}: ", bp.id());
+                if (auto func_bp = dynamic_cast<sdb::function_breakpoint*>(&bp))
+                {
+                    fmt::print("function = {}", func_bp->function_name());
+                }
+                else if (auto line_bp = dynamic_cast<sdb::line_breakpoint*>(&bp))
+                {
+                    fmt::print("file = {}, line = {}", line_bp->file().string(), line_bp->line());
+                }
+                else if (auto addr_bp = dynamic_cast<sdb::address_breakpoint*>(&bp))
+                {
+                    fmt::print("address = {:#x}", addr_bp->address().addr());
+                }
+                fmt::print(", {}:\n", bp.is_enabled() ? "enabled" : "disabled");
+                bp.breakpoint_sites().for_each([&](auto& site)
+                {
+                    fmt::print("    .{}: address = {:#x}, {}\n",
+                    site.id(), site.address().addr(),
+                    site.is_enabled() ? "enabled" : "disabled");
+                });
+            });
+        }
+    }
+
+    void handle_breakpoint_set_command(sdb::target& target, const std::vector<std::string>& args)
+    {
+        bool hardware = false;
+        if (args.size() == 4)
+        {
+            if (args[3] == "-h")
+            {
+                hardware = true;
+            }
+            else
+            {
+                sdb::error::send("Invalid breakpoint command argument");
+            }
+        }
+
+        if (args[2].find("0x") == 0)
+        {
+            auto address = sdb::to_integral<std::uint64_t>(args[2], 16);
+
+            if (!address)
+            {
+                fmt::print(stderr, "Breakpoint command expects address in hexadecimal, prefixed with '0x'\n");
+                return;
+            }
+
+            target.create_address_breakpoint(sdb::virt_addr{ *address }, hardware).enable();
+        }
+        else if (args[2].find(':') != std::string::npos)
+        {
+            auto data = split(args[2], ':');
+            auto path = data[0];
+            auto line = sdb::to_integral<std::uint64_t>(data[1]);
+            if (!line)
+            {
+                fmt::print(stderr, "Line number should be an integer\n");
+                return;
+            }
+            target.create_line_breakpoint(path, *line, hardware).enable();
+        }
+        else
+        {
+            target.create_function_breakpoint(args[2]).enable();
+        }
+    }
+
+    void handle_breakpoint_toggle(sdb::target& target, const std::vector<std::string>& args)
+    {
+        auto command = args[1];
+
+        auto dot_pos = args[2].find('.');
+        auto id_str = args[2].substr(0, dot_pos);
+        auto id = sdb::to_integral<sdb::breakpoint::id_type>(id_str);
+        if (!id)
+        {
+            std::cerr << "Command expects breakpoint id";
+            return;
+        }
+        auto& bp = target.breakpoints().get_by_id(*id);
+
+        if (dot_pos != std::string::npos)
+        {
+            auto site_id_str = args[2].substr(dot_pos + 1);
+            auto site_id = sdb::to_integral<sdb::breakpoint_site::id_type>(site_id_str);
+            if (!site_id)
+            {
+                std::cerr << "Command expects breakpoint site id";
+                return;
+            }
+            if (is_prefix(command, "enable"))
+            {
+                bp.breakpoint_sites().get_by_id(*site_id).enable();
+            }
+            else if (is_prefix(command, "disable"))
+            {
+                bp.breakpoint_sites().get_by_id(*site_id).disable();
+            }
+        }
+        else if (is_prefix(command, "enable"))
+        {
+            bp.enable();
+        }
+        else if (is_prefix(command, "disable"))
+        {
+            bp.disable();
+        }
+        else if (is_prefix(command, "delete"))
+        {
+            bp.breakpoint_sites().for_each([&](auto& site)
+            {
+                target.get_process().breakpoint_sites().remove_by_address(site.address());
+            });
+            target.breakpoints().remove_by_id(*id);
+        }
+    }
+
+    void handle_breakpoint_command(sdb::target& target, const std::vector<std::string>& args)
     {
         if (args.size() < 2)
         {
@@ -409,23 +605,7 @@ namespace
 
         if (is_prefix(command, "list"))
         {
-            if (process.breakpoint_sites().empty())
-            {
-                fmt::print("No breakpoints set\n");
-            }
-            else
-            {
-                fmt::print("Current breakpoints:\n");
-                process.breakpoint_sites().for_each([](auto& site)
-                {
-                    if (site.is_internal())
-                    {
-                        return;
-                    }
-                    fmt::print("{}: address = {:#x}, {}\n",
-                    site.id(), site.address().addr(), site.is_enabled() ? "enabled" : "disabled");
-                });
-            }
+            handle_breakpoint_list_command(target);
             return;
         }
 
@@ -437,49 +617,11 @@ namespace
 
         if (is_prefix(command, "set"))
         {
-            auto address = sdb::to_integral<std::uint64_t>(args[2], 16);
-
-            if (!address)
-            {
-                fmt::print(stderr, "Breakpoint command expects addres in hexadecimal, prefixed with '0x'\n");
-                return;
-            }
-
-            bool hardware = false;
-            if (args.size() == 4)
-            {
-                if (args[3] == "-h")
-                {
-                    hardware = true;
-                }
-                else
-                {
-                    sdb::error::send("Invalid breakpoint command argument");
-                }
-            }
-            process.create_breakpoint_site(sdb::virt_addr{ *address }, hardware).enable();
+            handle_breakpoint_set_command(target, args);
             return;
         }
 
-        auto id = sdb::to_integral<sdb::breakpoint_site::id_type>(args[2]);
-        if (!id)
-        {
-            std::cerr << "Command expects breakpoint id";
-            return;
-        }
-
-        if (is_prefix(command, "enable"))
-        {
-            process.breakpoint_sites().get_by_id(*id).enable();
-        }
-        else if (is_prefix(command, "disable"))
-        {
-            process.breakpoint_sites().get_by_id(*id).disable();
-        }
-        else if (is_prefix(command, "delete"))
-        {
-            process.breakpoint_sites().remove_by_id(*id);
-        }
+        handle_breakpoint_toggle(target, args);
     }
     
     void handle_syscall_catchpoint_command(sdb::process& process, const std::vector<std::string>& args)
@@ -766,13 +908,28 @@ namespace
         }
         else if (is_prefix(command, "breakpoint"))
         {
-            handle_breakpoint_command(*process, args);
+            handle_breakpoint_command(*target, args);
         }
         else if (is_prefix(command, "catchpoint"))
         {
             handle_catchpoint_command(*process, args);
         }
+        else if (is_prefix(command, "next"))
+        {
+            auto reason = target->step_over();
+            handle_stop(*target, reason);
+        }
+        else if (is_prefix(command, "finish"))
+        {
+            auto reason = target->step_out();
+            handle_stop(*target, reason);
+        }
         else if (is_prefix(command, "step"))
+        {
+            auto reason = target->step_in();
+            handle_stop(*target, reason);
+        }
+        else if (is_prefix(command, "stepi"))
         {
             auto reason = process->step_instruction();
             handle_stop(*target, reason);
@@ -842,7 +999,7 @@ int main(int argc, const char** argv)
     try
     {
         auto target = attach(argc, argv);
-        g_sdb_process = &target->get_process();;
+        g_sdb_process = &target->get_process();
         signal(SIGINT, handle_sigint);
         main_loop(target);
     }

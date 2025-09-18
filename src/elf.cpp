@@ -30,7 +30,7 @@ sdb::elf::elf(const std::filesystem::path& path)
     if ((ret = mmap(0, file_size_, PROT_READ, MAP_SHARED, fd_, 0)) == MAP_FAILED)
     {
         close(fd_);
-        error::send_errno("Could not map ELF file");
+        error::send_errno("Could not mmap ELF file");
     }
     data_ = reinterpret_cast<std::byte*>(ret);
 

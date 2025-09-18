@@ -21,6 +21,7 @@ namespace sdb
 
         void enable();
         void disable();
+        void remove() {}
 
         bool is_enabled() const { return is_enabled_; }
         virt_addr address() const { return address_; }

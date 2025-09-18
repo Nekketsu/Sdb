@@ -52,7 +52,7 @@ std::vector<std::byte> sdb::pipe::read()
     int chars_read;
     if ((chars_read = ::read(fds_[read_fd], buf, sizeof(buf))) < 0)
     {
-        error::send_errno("Could not read frrom pipe");
+        error::send_errno("Could not read from pipe");
     }
 
     auto bytes = reinterpret_cast<std::byte*>(buf);
