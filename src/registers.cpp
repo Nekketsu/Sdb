@@ -41,6 +41,11 @@ namespace
 
 sdb::registers::value sdb::registers::read(const register_info& info) const
 {
+    if (is_undefined(info.id))
+    {
+        sdb::error::send("Register is undefined");
+    }
+
     auto bytes = as_bytes(data_);
 
     if (info.format == register_format::uint)
@@ -72,7 +77,7 @@ sdb::registers::value sdb::registers::read(const register_info& info) const
     }
 }
 
-void sdb::registers::write(const register_info& info, value val)
+void sdb::registers::write(const register_info& info, value val, bool commit)
 {
     auto bytes = as_bytes(data_);
 
@@ -91,13 +96,46 @@ void sdb::registers::write(const register_info& info, value val)
         }
     }, val);
 
-    if (info.type == register_type::fpr)
+    if (commit)
     {
-        proc_->write_fprs(data_.i387);
+        if (info.type == register_type::fpr)
+        {
+            proc_->write_fprs(data_.i387);
+        }
+        else
+        {
+            auto aligned_offset = info.offset & ~0b111;
+            proc_->write_user_area(aligned_offset, from_bytes<std::uint64_t>(bytes + aligned_offset));
+        }
     }
-    else
+}
+
+void sdb::registers::flush()
+{
+    proc_->write_fprs(data_.i387);
+    proc_->write_gprs(data_.regs);
+    auto info = register_info_by_id(register_id::dr0);
+    for (auto i = 0; i < 8; ++i)
     {
-        auto aligned_offset = info.offset & ~0b111;
-        proc_->write_user_area(aligned_offset, from_bytes<std::uint64_t>(bytes + aligned_offset));
+        if (i == 4 or i == 5)
+        {
+            continue;
+        }
+        auto reg_offset = info.offset + sizeof(std::uint64_t) * i;
+        auto ptr = reinterpret_cast<std::byte*>(data_.u_debugreg + i);
+        auto bytes = from_bytes<std::uint64_t>(ptr);
+        proc_->write_user_area(reg_offset, bytes);
     }
+}
+
+bool sdb::registers::is_undefined(register_id id) const
+{
+    std::size_t canonical_offset = register_info_by_id(id).offset >> 1;
+    return std::find(begin(undefined_), end(undefined_), canonical_offset) != end(undefined_);
+}
+
+void sdb::registers::undefine(register_id id)
+{
+    std::size_t canonical_offset = register_info_by_id(id).offset >> 1;
+    undefined_.push_back(canonical_offset);
 }

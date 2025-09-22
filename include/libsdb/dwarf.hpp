@@ -11,6 +11,7 @@
 #include <optional>
 #include <string>
 #include <filesystem>
+#include <libsdb/registers.hpp>
 
 namespace sdb
 {
@@ -338,6 +339,7 @@ namespace sdb
         die die_;
     };
 
+    class process;
     class dwarf;
     class call_frame_information
     {
@@ -384,6 +386,8 @@ namespace sdb
         const dwarf& dwarf_info() const { return *dwarf_; }
 
         const common_information_entry& get_cie(file_offset at) const;
+
+        registers unwind(const process& proc, file_addr pc, registers& regs) const;
 
     private:
         const dwarf* dwarf_;
