@@ -240,6 +240,17 @@ sdb::stop_reason sdb::process::wait_on_signal()
                 breakpoint_sites_.get_by_address(instr_begin).is_enabled())
             {
                 set_pc(instr_begin);
+
+                auto& bp = breakpoint_sites_.get_by_address(instr_begin);
+                if (bp.parent_)
+                {
+                    bool should_restart = bp.parent_->notify_hit();
+                    if (should_restart)
+                    {
+                        resume();
+                        return wait_on_signal();
+                    }
+                }
             }
             else if (reason.trap_reason == trap_type::hardware_break)
             {
