@@ -11,6 +11,13 @@
 
 namespace sdb
 {
+    struct thread
+    {
+        thread(thread_state* state, stack frames) : state(state), frames(std::move(frames)) {}
+        thread_state* state;
+        stack frames;
+    };
+
     class target
     {
     public:
@@ -26,17 +33,24 @@ namespace sdb
         process& get_process() { return *process_; }
         const process& get_process() const { return *process_; }
         void notify_stop(const sdb::stop_reason& reason);
-        file_addr get_pc_file_address() const;
+        file_addr get_pc_file_address(std::optional<pid_t> otid = std::nullopt) const;
 
-        stack& get_stack() { return stack_; }
-        const stack& get_stack() const { return stack_; }
+        stack& get_stack(std::optional<pid_t> otid = std::nullopt)
+        {
+            auto tid = otid.value_or(process_->current_thread());
+            return threads_.at(tid).frames;
+        }
+        const stack& get_stack(std::optional<pid_t> otid = std::nullopt) const
+        {
+            return const_cast<target*>(this)->get_stack(otid);
+        }
 
-        sdb::stop_reason step_in();
-        sdb::stop_reason step_out();
-        sdb::stop_reason step_over();
+        sdb::stop_reason step_in(std::optional<pid_t> otid = std::nullopt);
+        sdb::stop_reason step_out(std::optional<pid_t> otid = std::nullopt);
+        sdb::stop_reason step_over(std::optional<pid_t> otid = std::nullopt);
 
-        sdb::line_table::iterator line_entry_at_pc() const;
-        sdb::stop_reason run_until_address(virt_addr address);
+        sdb::line_table::iterator line_entry_at_pc(std::optional<pid_t> otid = std::nullopt) const;
+        sdb::stop_reason run_until_address(virt_addr address, std::optional<pid_t> otid = std::nullopt);
 
         struct find_functions_result
         {
@@ -63,12 +77,28 @@ namespace sdb
 
         std::vector<line_table::iterator> get_line_entries_by_line(std::filesystem::path path, std::size_t line) const;
 
+        std::unordered_map<pid_t, thread>& threads()
+        {
+            return threads_;
+        }
+        const std::unordered_map<pid_t, thread>& threads() const
+        {
+            return threads_;
+        }
+
+        void notify_thread_lifecycle_event(const sdb::stop_reason& reason);
+
     private:
         target(std::unique_ptr<process> proc, std::unique_ptr<elf> obj)
-            : process_(std::move(proc)), stack_(this), main_elf_(obj.get())
+            : process_(std::move(proc)), main_elf_(obj.get())
+        {
+            elves_.push(std::move(obj));
+            auto pid = process_->pid();
+            for (auto& [tid, state] : process_->thread_states())
             {
-                elves_.push(std::move(obj));
+                threads_.emplace(tid, thread(&state, stack{ this, tid }));
             }
+        }
         
         void resolve_dynamic_linker_rendezvous();
         void reload_dynamic_libraries();
@@ -76,9 +106,9 @@ namespace sdb
         std::unique_ptr<process> process_;
         elf_collection elves_;
         elf* main_elf_;
-        stack stack_;
         stoppoint_collection<breakpoint> breakpoints_;
         virt_addr dynamic_linker_rendezvous_address_;
+        std::unordered_map<pid_t, thread> threads_;
     };
 }
 

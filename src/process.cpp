@@ -57,9 +57,9 @@ namespace
 
     void set_ptrace_options(pid_t pid)
     {
-        if (ptrace(PTRACE_SETOPTIONS, pid, nullptr, PTRACE_O_TRACESYSGOOD) < 0)
+        if (ptrace(PTRACE_SETOPTIONS, pid, nullptr, PTRACE_O_TRACESYSGOOD | PTRACE_O_TRACECLONE) < 0)
         {
-            sdb::error::send_errno("Failed to set TRACESYSGOOD option");
+            sdb::error::send_errno("Failed to set TRACESYSGOOD and TRACECLONE options");
         }
     }
 }
@@ -94,7 +94,7 @@ std::unique_ptr<sdb::process> sdb::process::launch(
                 exit_with_perror(channel, "stdout replacement failed");
             }
         }
-        if (debug && ptrace(PTRACE_TRACEME, 0, nullptr, nullptr) < 0)
+        if (debug and ptrace(PTRACE_TRACEME, 0, nullptr, nullptr) < 0)
         {
             exit_with_perror(channel, "Tracing failed");
         }
@@ -170,35 +170,12 @@ sdb::process::~process()
     }
 }
 
-void sdb::process::resume()
+sdb::stop_reason::stop_reason(pid_t tid, int wait_status) : tid(tid)
 {
-    auto pc = get_pc();
-    if (breakpoint_sites_.enabled_stoppoint_at_address(pc))
+    if ((wait_status >> 8) == (SIGTRAP | (PTRACE_EVENT_CLONE << 8)))
     {
-        auto& bp = breakpoint_sites_.get_by_address(pc);
-        bp.disable();
-        if (ptrace(PTRACE_SINGLESTEP, pid_, nullptr, nullptr) < 0)
-        {
-            error::send_errno("Failed to single step");
-        }
-        int wait_status;
-        if (waitpid(pid_, &wait_status, 0) < 0)
-        {
-            error::send_errno("waitpid failed");
-        }
-        bp.enable();
+        trap_reason = trap_type::clone;
     }
-
-    auto request = syscall_catch_policy_.get_mode() == syscall_catch_policy::mode::none ? PTRACE_CONT : PTRACE_SYSCALL;
-    if (ptrace(request, pid_, nullptr, nullptr) < 0)
-    {
-        error::send_errno("Could not resume");
-    }
-    state_ = process_state::running;
-}
-
-sdb::stop_reason::stop_reason(int wait_status)
-{
     if (WIFEXITED(wait_status))
     {
         reason = process_state::exited;
@@ -216,71 +193,59 @@ sdb::stop_reason::stop_reason(int wait_status)
     }
 }
 
-sdb::stop_reason sdb::process::wait_on_signal()
+sdb::stop_reason sdb::process::wait_on_signal(pid_t to_await)
 {
     int wait_status;
-    int options = 0;
-    if (waitpid(pid_, &wait_status, options) < 0)
+    int options = __WALL;
+    pid_t tid;
+    if ((tid = waitpid(to_await, &wait_status, options)) < 0)
     {
         error::send_errno("waitpid failed");
     }
-    stop_reason reason(wait_status);
-    state_ = reason.reason;
 
-    if (is_attached_ and state_ == process_state::stopped)
+    stop_reason reason(tid, wait_status);
+    auto final_reason = handle_signal(reason, true);
+    if (!final_reason)
     {
-        read_all_registers();
-        augment_stop_reason(reason);
+        resume(tid);
+        return wait_on_signal(to_await);
+    }
 
-        auto instr_begin = get_pc() - 1;
-        if (reason.info == SIGTRAP)
+    reason = *final_reason;
+    auto& thread = threads_.at(tid);
+    thread.reason = reason;
+    thread.state = reason.reason;
+
+    if (reason.reason == process_state::exited or
+        reason.reason == process_state::terminated)
+    {
+        report_thread_lifecycle_event(reason);
+        if (tid == pid_)
         {
-            if (reason.trap_reason == trap_type::software_break and
-                breakpoint_sites_.contains_address(instr_begin) and
-                breakpoint_sites_.get_by_address(instr_begin).is_enabled())
-            {
-                set_pc(instr_begin);
-
-                auto& bp = breakpoint_sites_.get_by_address(instr_begin);
-                if (bp.parent_)
-                {
-                    bool should_restart = bp.parent_->notify_hit();
-                    if (should_restart)
-                    {
-                        resume();
-                        return wait_on_signal();
-                    }
-                }
-            }
-            else if (reason.trap_reason == trap_type::hardware_break)
-            {
-                auto id = get_current_hardware_stoppoint();
-                if (id.index() == 1)
-                {
-                    watchpoints_.get_by_id(std::get<1>(id)).update_data();
-                }
-            }
-            else if (reason.trap_reason == trap_type::syscall)
-            {
-                reason = maybe_resume_from_syscall(reason);
-            }
+            state_ = reason.reason;
+            return reason;
         }
-        if (target_)
+        else
         {
-            target_->notify_stop(reason);
+            return wait_on_signal(-1);
         }
     }
 
+    stop_running_threads();
+    reason = cleanup_exited_threads(tid).value_or(reason);
+
+    state_ = reason.reason;
+    current_thread_ = tid;
     return reason;
 }
 
-void sdb::process::read_all_registers()
+void sdb::process::read_all_registers(pid_t tid)
 {
-    if (ptrace(PTRACE_GETREGS, pid_, nullptr, &get_registers().data_.regs) < 0)
+    if (ptrace(PTRACE_GETREGS, tid, nullptr, &get_registers(tid).data_.regs) < 0)
     {
         error::send_errno("Could not read GPR registers");
     }
-    if (ptrace(PTRACE_GETFPREGS, pid_, nullptr, &get_registers().data_.i387) < 0)
+    if (ptrace(PTRACE_GETFPREGS, tid, nullptr, &get_registers(tid).data_.i387) < 0)
     {
         error::send_errno("Could not read FPR registers");
     }
@@ -290,35 +255,38 @@ void sdb::process::read_all_registers()
         auto info = register_info_by_id(static_cast<register_id>(id));
 
         errno = 0;
-        std::int64_t data = ptrace(PTRACE_PEEKUSER, pid_, info.offset, nullptr);
+        std::int64_t data = ptrace(PTRACE_PEEKUSER, tid, info.offset, nullptr);
         if (errno != 0)
         {
             error::send_errno("Could not read debug register");
         }
 
-        get_registers().data_.u_debugreg[i] = data;
+        get_registers(tid).data_.u_debugreg[i] = data;
     }
 }
 
-void sdb::process::write_user_area(std::size_t offset, std::uint64_t data)
+void sdb::process::write_user_area(std::size_t offset, std::uint64_t data, std::optional<pid_t> otid)
 {
-    if (ptrace(PTRACE_POKEUSER, pid_, offset, data) < 0)
+    auto tid = otid.value_or(current_thread_);
+    if (ptrace(PTRACE_POKEUSER, tid, offset, data) < 0)
     {
         error::send_errno("Could not write to user area");
     }
 }
 
-void sdb::process::write_fprs(const user_fpregs_struct& fprs)
+void sdb::process::write_fprs(const user_fpregs_struct& fprs, std::optional<pid_t> otid)
 {
-    if (ptrace(PTRACE_SETFPREGS, pid_, nullptr, &fprs) < 0)
+    auto tid = otid.value_or(current_thread_);
+    if (ptrace(PTRACE_SETFPREGS, tid, nullptr, &fprs) < 0)
     {
         error::send_errno("Could not write floating point registers");
     }
 }
 
-void sdb::process::write_gprs(const user_regs_struct& gprs)
+void sdb::process::write_gprs(const user_regs_struct& gprs, std::optional<pid_t> otid)
 {
-    if (ptrace(PTRACE_SETREGS, pid_, nullptr, &gprs) < 0)
+    auto tid = otid.value_or(current_thread_);
+    if (ptrace(PTRACE_SETREGS, tid, nullptr, &gprs) < 0)
     {
         error::send_errno("Could not write general purpose registers");
     }
@@ -334,10 +302,11 @@ sdb::breakpoint_site& sdb::process::create_breakpoint_site(virt_addr address, bo
     return breakpoint_sites_.push(std::unique_ptr<breakpoint_site>(new breakpoint_site(*this, address, hardware, internal)));
 }
 
-sdb::stop_reason sdb::process::step_instruction()
+sdb::stop_reason sdb::process::step_instruction(std::optional<pid_t> otid)
 {
+    auto tid = otid.value_or(current_thread_);
     std::optional<breakpoint_site*> to_reenable;
-    auto pc = get_pc();
+    auto pc = get_pc(tid);
     if (breakpoint_sites_.enabled_stoppoint_at_address(pc))
     {
         auto& bp = breakpoint_sites_.get_by_address(pc);
@@ -345,11 +314,12 @@ sdb::stop_reason sdb::process::step_instruction()
         to_reenable = &bp;
     }
 
-    if (ptrace(PTRACE_SINGLESTEP, pid_, nullptr, nullptr) < 0)
+    swallow_pending_sigstop(tid);
+    if (ptrace(PTRACE_SINGLESTEP, tid, nullptr, nullptr) < 0)
     {
         error::send_errno("Could not single step");
     }
-    auto reason = wait_on_signal();
+    auto reason = wait_on_signal(tid);
 
     if (to_reenable)
     {
@@ -453,6 +423,17 @@ int sdb::process::set_hardware_stoppoint(virt_addr address, stoppoint_mode mode,
 
     regs.write_by_id(register_id::dr7, masked);
 
+    for (auto& [tid, _] : threads_)
+    {
+        if (tid == current_thread_)
+        {
+            continue;
+        }
+        auto& other_regs = get_registers(tid);
+        other_regs.write_by_id(static_cast<register_id>(id), address.addr());
+        other_regs.write_by_id(register_id::dr7, masked);
+    }
+
     return free_space;
 }
 
@@ -468,6 +449,17 @@ void sdb::process::clear_hardware_stoppoint(int index)
     auto masked = control & ~clear_mask;
 
     get_registers().write_by_id(register_id::dr7, masked);
+
+    for (auto& [tid, _] : threads_)
+    {
+        if (tid == current_thread_)
+        {
+            continue;
+        }
+        auto& other_regs = get_registers(tid);
+        other_regs.write_by_id(static_cast<register_id>(id), 0);
+        other_regs.write_by_id(register_id::dr7, masked);
+    }
 }
 
 int sdb::process::set_watchpoint(watchpoint::id_type id, virt_addr address, stoppoint_mode mode, std::size_t size)
@@ -486,8 +478,9 @@ sdb::watchpoint& sdb::process::create_watchpoint(virt_addr address, stoppoint_mo
 
 void sdb::process::augment_stop_reason(sdb::stop_reason& reason)
 {
+    auto tid = reason.tid;
     siginfo_t info;
-    if (ptrace(PTRACE_GETSIGINFO, pid_, nullptr, &info) < 0)
+    if (ptrace(PTRACE_GETSIGINFO, tid, nullptr, &info) < 0)
     {
         error::send_errno("Failed to get signal info");
     }
@@ -495,7 +488,7 @@ void sdb::process::augment_stop_reason(sdb::stop_reason& reason)
     if (reason.info == (SIGTRAP | 0x80))
     {
         auto& sys_info = reason.syscall_info.emplace();
-        auto& regs = get_registers();
+        auto& regs = get_registers(tid);
 
         if (expecting_syscall_exit_)
         {
@@ -547,9 +540,9 @@ void sdb::process::augment_stop_reason(sdb::stop_reason& reason)
     }
 }
 
-std::variant<sdb::breakpoint_site::id_type, sdb::watchpoint::id_type> sdb::process::get_current_hardware_stoppoint() const
+std::variant<sdb::breakpoint_site::id_type, sdb::watchpoint::id_type> sdb::process::get_current_hardware_stoppoint(std::optional<pid_t> otid) const
 {
-    auto& regs = get_registers();
+    auto& regs = get_registers(otid);
     auto status = regs.read_by_id_as<std::uint64_t>(register_id::dr6);
     auto index = __builtin_ctzll(status);
 
@@ -569,7 +562,7 @@ std::variant<sdb::breakpoint_site::id_type, sdb::watchpoint::id_type> sdb::proce
     }
 }
 
-sdb::stop_reason sdb::process::maybe_resume_from_syscall(const stop_reason& reason)
+bool sdb::process::should_resume_from_syscall(const stop_reason& reason)
 {
     if (syscall_catch_policy_.get_mode() == syscall_catch_policy::mode::some)
     {
@@ -578,12 +571,11 @@ sdb::stop_reason sdb::process::maybe_resume_from_syscall(const stop_reason& reas
 
         if (found == end(to_catch))
         {
-            resume();
-            return wait_on_signal();
+            return true;
         }
     }
 
-    return reason;
+    return false;
 }
 
 std::unordered_map<int, std::uint64_t> sdb::process::get_auxv() const
@@ -615,4 +607,245 @@ sdb::breakpoint_site& sdb::process::create_breakpoint_site(breakpoint* parent, b
         error::send("Breakpoint site already created at address " + std::to_string(address.addr()));
     }
     return breakpoint_sites_.push(std::unique_ptr<breakpoint_site>(new breakpoint_site(parent, id, *this, address, hardware, internal)));
+}
+
+void sdb::process::populate_existing_threads()
+{
+    auto path = "/proc/" + std::to_string(pid_) + "/task";
+    for (auto& entry : std::filesystem::directory_iterator(path))
+    {
+        auto tid = std::stoi(entry.path().filename().string());
+        threads_.emplace(tid, thread_state{ tid, registers(*this, tid) });
+    }
+}
+
+sdb::virt_addr sdb::process::get_pc(std::optional<pid_t> otid) const
+{
+    return virt_addr{ get_registers(otid).read_by_id_as<std::uint64_t>(register_id::rip) };
+}
+
+void sdb::process::set_pc(virt_addr address, std::optional<pid_t> otid)
+{
+    get_registers(otid).write_by_id(register_id::rip, address.addr());
+}
+
+sdb::registers& sdb::process::get_registers(std::optional<pid_t> otid)
+{
+    auto tid = otid.value_or(current_thread_);
+    return threads_.at(tid).regs;
+}
+
+const sdb::registers& sdb::process::get_registers(std::optional<pid_t> otid) const
+{
+    return const_cast<process*>(this)->get_registers(otid);
+}
+
+void sdb::process::resume(std::optional<pid_t> otid)
+{
+    auto tid = otid.value_or(current_thread_);
+    step_over_breakpoint(tid);
+    send_continue(tid);
+}
+
+void sdb::process::step_over_breakpoint(pid_t tid)
+{
+    auto pc = get_pc(tid);
+    if (breakpoint_sites_.enabled_stoppoint_at_address(pc))
+    {
+        auto& bp = breakpoint_sites_.get_by_address(pc);
+        bp.disable();
+        swallow_pending_sigstop(tid);
+        if (ptrace(PTRACE_SINGLESTEP, tid, nullptr, nullptr) < 0)
+        {
+            error::send_errno("Failed to single step");
+        }
+        int wait_status;
+        if (waitpid(tid, &wait_status, 0) < 0)
+        {
+            error::send_errno("waitpid failed");
+        }
+        bp.enable();
+    }
+}
+
+void sdb::process::send_continue(pid_t tid)
+{
+    auto request = syscall_catch_policy_.get_mode() == syscall_catch_policy::mode::none
+        ? PTRACE_CONT
+        : PTRACE_SYSCALL;
+    if (ptrace(request, tid, nullptr, nullptr) <0)
+    {
+        error::send_errno("Could not resume");
+    }
+    threads_.at(tid).state = process_state::running;
+    state_ = process_state::running;
+}
+
+void sdb::process::resume_all_threads()
+{
+    for (auto& [tid, _] : threads_)
+    {
+        step_over_breakpoint(tid);
+    }
+    for (auto& [tid, _] : threads_)
+    {
+        send_continue(tid);
+    }
+}
+
+void sdb::process::stop_running_threads()
+{
+    for (auto& [tid, thread] : threads_)
+    {
+        if (thread.state == process_state::running)
+        {
+            if (!thread.pending_sigstop)
+            {
+                tgkill(pid_, tid, SIGSTOP);
+            }
+
+            int wait_status;
+            waitpid(tid, &wait_status, 0);
+
+            stop_reason thread_reason(tid, wait_status);
+            if (thread_reason.reason == process_state::stopped)
+            {
+                if (thread_reason.info != SIGSTOP)
+                {
+                    thread.pending_sigstop = true;
+                }
+                else if (thread.pending_sigstop)
+                {
+                    thread.pending_sigstop = false;
+                }
+            }
+
+            thread_reason = handle_signal(thread_reason, false).value_or(thread_reason);
+            threads_.at(tid).reason = thread_reason;
+            threads_.at(tid).state = thread_reason.reason;
+        }
+    }
+}
+
+std::optional<sdb::stop_reason> sdb::process::cleanup_exited_threads(pid_t main_stop_tid)
+{
+    std::vector<pid_t> to_remove;
+    std::optional<stop_reason> to_report;
+    for (auto& [tid, thread] : threads_)
+    {
+        if (tid != main_stop_tid and
+            (thread.state == process_state::exited or
+             thread.state == process_state::terminated))
+        {
+            report_thread_lifecycle_event(thread.reason);
+            to_remove.push_back(tid);
+            if (tid == pid_)
+            {
+                to_report = thread.reason;
+            }
+        }
+    }
+
+    for (auto tid : to_remove)
+    {
+        threads_.erase(tid);
+    }
+    return to_report;
+}
+
+void sdb::process::report_thread_lifecycle_event(const sdb::stop_reason& reason)
+{
+    if (thread_lifecycle_callback_)
+    {
+        thread_lifecycle_callback_(reason);
+    }
+    if (target_)
+    {
+        target_->notify_thread_lifecycle_event(reason);
+    }
+}
+
+std::optional<sdb::stop_reason> sdb::process::handle_signal(stop_reason reason, bool is_main_stop)
+{
+    auto tid = reason.tid;
+
+    if (reason.trap_reason and
+        *reason.trap_reason == trap_type::clone and
+        is_main_stop)
+    {
+        return std::nullopt;
+    }
+
+    if (is_attached_ and reason.reason == process_state::stopped)
+    {
+        if (!threads_.count(tid))
+        {
+            threads_.emplace(tid, thread_state{ tid, registers(*this, tid) });
+            report_thread_lifecycle_event(reason);
+            if (is_main_stop)
+            {
+                return std::nullopt;
+            }
+        }
+
+        if (threads_.at(tid).pending_sigstop and reason.info == SIGSTOP)
+        {
+            threads_.at(tid).pending_sigstop = false;
+            return std::nullopt;
+        }
+
+        read_all_registers(tid);
+        augment_stop_reason(reason);
+
+        if (reason.info == SIGTRAP)
+        {
+            auto instr_begin = get_pc(tid) - 1;
+            if (reason.trap_reason == trap_type::software_break and
+                breakpoint_sites_.contains_address(instr_begin) and
+                breakpoint_sites_.get_by_address(instr_begin).is_enabled())
+            {
+                set_pc(instr_begin, tid);
+
+                auto& bp = breakpoint_sites_.get_by_address(instr_begin);
+                if (bp.parent_)
+                {
+                    bool should_restart = bp.parent_->notify_hit();
+                    if (should_restart and is_main_stop)
+                    {
+                        return std::nullopt;
+                    }
+                }
+            }
+            else if (reason.trap_reason == trap_type::hardware_break)
+            {
+                auto id = get_current_hardware_stoppoint(tid);
+                if (id.index() == 1)
+                {
+                    watchpoints_.get_by_id(std::get<1>(id)).update_data();
+                }
+            }
+            else if (reason.trap_reason == trap_type::syscall and
+                     is_main_stop and
+                     should_resume_from_syscall(reason))
+            {
+                return std::nullopt;
+            }
+        }
+
+        if (target_)
+        {
+            target_->notify_stop(reason);
+        }
+    }
+    return reason;
+}
+
+void sdb::process::swallow_pending_sigstop(pid_t tid)
+{
+    if (threads_.at(tid).pending_sigstop)
+    {
+        ptrace(PTRACE_CONT, tid, nullptr, nullptr);
+        waitpid(tid, nullptr, 0);
+        threads_.at(tid).pending_sigstop = false;
+    }
 }

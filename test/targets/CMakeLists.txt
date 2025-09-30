@@ -29,3 +29,6 @@ add_test_cpp_target(marshmallow)
 add_library(meow SHARED "libmeow.cpp")
 target_compile_options(meow PRIVATE -g -O0 -fPIC -gdwarf-4)
 target_link_libraries(marshmallow PRIVATE meow)
+
+add_test_cpp_target(multi_threaded)
+target_link_libraries(multi_threaded pthread)
