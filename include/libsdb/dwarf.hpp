@@ -142,6 +142,7 @@ namespace sdb
 
     class compile_unit;
     class die;
+    class type;
     class attr
     {
     public:
@@ -162,6 +163,8 @@ namespace sdb
         dwarf_expression as_expression(bool in_frame_info) const;
         location_list as_location_list(bool in_frame_info) const;
         dwarf_expression::result as_evaluated_location(const sdb::process& proc, const registers& regs, bool in_frame_info) const;
+
+        type as_type() const;
 
     private:
         const compile_unit* cu_;
@@ -320,6 +323,7 @@ namespace sdb
         const line_table::file* file;
         std::uint64_t line;
     };
+
     class die
     {
     public:
@@ -348,6 +352,14 @@ namespace sdb
             source_location location() const;
             const line_table::file& file() const;
             std::uint64_t line() const;
+
+            struct bitfield_information
+            {
+                std::uint64_t bit_size;
+                std::uint64_t storage_byte_size;
+                std::uint8_t bit_offset;
+            };
+            std::optional<bitfield_information> get_bitfield_information(std::uint64_t class_byte_size) const;
 
         private:
             const std::byte* pos_ = nullptr;
@@ -493,6 +505,9 @@ namespace sdb
         const call_frame_information& cfi() const { return *cfi_; }
 
         std::optional<die> find_global_variable(std::string name) const;
+
+        std::optional<die> find_local_variables(std::string name, file_addr pc) const;
+        std::vector<die> scopes_at_address(file_addr address) const;
 
     private:
         void index() const;

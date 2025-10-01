@@ -219,6 +219,8 @@ namespace sdb
             thread_lifecycle_callback_ = std::move(callback);
         }
 
+        std::string read_string(virt_addr address) const;
+
     private:
         process(pid_t pid, bool terminate_on_end, bool is_attached)
             : pid_(pid),
