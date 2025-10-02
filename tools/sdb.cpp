@@ -996,7 +996,7 @@ namespace
         auto name = args[2];
         auto pc = target.get_pc_file_address();
         auto data = target.resolve_indirect_name(name, pc);
-        auto str = data.visualize(target.get_process());
+        auto str = data.variable->visualize(target.get_process());
         fmt::print("Value: {}\n", str);
     }
 
@@ -1085,6 +1085,16 @@ namespace
             process->resume();
             auto reason = process->wait_on_signal();
             handle_stop(*target, reason);
+        }
+        else if (is_prefix(command, "expression"))
+        {
+            auto expr = line.substr(line.find(' ') + 1);
+            auto ret = target->evaluate_expression(expr);
+            if (ret)
+            {
+                auto str = ret->return_value.visualize(target->get_process());
+                fmt::print("${}: {}\n", ret->id, str);
+            }
         }
         else if (is_prefix(command, "memory"))
         {

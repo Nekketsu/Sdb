@@ -44,6 +44,20 @@ namespace sdb
         return ret;
     }
 
+    template <class From>
+    sdb::span<const std::byte> to_byte_span(const From& from)
+    {
+        return { as_bytes(from), sizeof(From) };
+    }
+
+    template <class From>
+    std::vector<std::byte> to_byte_vec(const From& from)
+    {
+        std::vector<std::byte> ret(sizeof(From));
+        std::memcpy(ret.data(), as_bytes(from), sizeof(From));
+        return ret;
+    }
+
     inline std::string_view to_string_view(const std::byte* data, std::size_t size)
     {
         return { reinterpret_cast<const char*>(data), size };

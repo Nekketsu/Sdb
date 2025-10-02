@@ -361,6 +361,8 @@ namespace sdb
             };
             std::optional<bitfield_information> get_bitfield_information(std::uint64_t class_byte_size) const;
 
+            std::vector<type> parameter_types() const;
+
         private:
             const std::byte* pos_ = nullptr;
             const compile_unit* cu_ = nullptr;
@@ -506,8 +508,10 @@ namespace sdb
 
         std::optional<die> find_global_variable(std::string name) const;
 
-        std::optional<die> find_local_variables(std::string name, file_addr pc) const;
+        std::optional<die> find_local_variable(std::string name, file_addr pc) const;
         std::vector<die> scopes_at_address(file_addr address) const;
+
+        std::optional<die> get_member_function_definition(const sdb::die& declaration) const;
 
     private:
         void index() const;
@@ -525,6 +529,7 @@ namespace sdb
         mutable std::unordered_multimap<std::string, index_entry> function_index_;
         std::unique_ptr<call_frame_information> cfi_;
         mutable std::unordered_multimap<std::string, index_entry> global_variable_index_;
+        mutable std::unordered_map<const std::byte*, index_entry> member_function_index_;
     };
 }
 

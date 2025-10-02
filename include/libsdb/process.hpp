@@ -164,6 +164,11 @@ namespace sdb
         std::vector<std::byte> read_memory_without_traps(virt_addr address, std::size_t amount) const;
         void write_memory(virt_addr address, span<const std::byte> data);
 
+        sdb::registers inferior_call(
+            sdb::virt_addr func_addr, sdb::virt_addr return_addr,
+            const sdb::registers& regs_to_store,
+            std::optional<pid_t> otid = std::nullopt);
+
         template <class T>
         T read_memory_as(virt_addr address) const
         {

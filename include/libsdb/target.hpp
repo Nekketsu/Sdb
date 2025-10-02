@@ -8,6 +8,7 @@
 #include <libsdb/dwarf.hpp>
 #include <libsdb/breakpoint.hpp>
 #include <link.h>
+#include <libsdb/type.hpp>
 
 namespace sdb
 {
@@ -91,8 +92,24 @@ namespace sdb
 
         std::vector<std::byte> read_location_data(const dwarf_expression::result& loc, std::size_t size, std::optional<pid_t> otid = std::nullopt) const;
 
-        typed_data resolve_indirect_name(std::string name, file_addr pc) const;
+        struct resolve_indirect_name_result
+        {
+            std::optional<typed_data> variable;
+            std::vector<die> funcs;
+        };
+        resolve_indirect_name_result resolve_indirect_name(std::string name, file_addr pc) const;
         std::optional<die> find_variable(std::string name, file_addr pc) const;
+
+        virt_addr inferior_malloc(std::size_t size);
+
+        struct evaluate_expression_result
+        {
+            typed_data return_value;
+            std::uint64_t id;
+        };
+        std::optional<evaluate_expression_result> evaluate_expression(std::string_view expr, std::optional<pid_t> otid = std::nullopt);
+
+        const typed_data& get_expression_result(std::size_t i) const;
 
     private:
         target(std::unique_ptr<process> proc, std::unique_ptr<elf> obj)
@@ -115,6 +132,7 @@ namespace sdb
         stoppoint_collection<breakpoint> breakpoints_;
         virt_addr dynamic_linker_rendezvous_address_;
         std::unordered_map<pid_t, thread> threads_;
+        mutable std::vector<typed_data> expression_results_;
     };
 }
 
